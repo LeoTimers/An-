@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>An型量子仿射代数表示计算器</title>
+    <style>
+        :root {
+            --bg-color: #f0f2f5;
+            --card-bg: #ffffff;
+            --header-color: #1a3a5f;
+            --border-color: #e8eaf0;
+            --control-bg: #f8f9fa;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: var(--bg-color);
+            padding: 2rem;
+            min-height: 100vh;
+        }
+
+        .main-card {
+            max-width: 1600px;
+            margin: auto;
+            background: var(--card-bg);
+            border-radius: 16px;
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.05);
+            overflow: hidden;
+            border: 1px solid var(--border-color);
+        }
+
+        .header {
+            padding: 1.5rem 2rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+        .header h1 { font-size: 1.75rem; color: var(--header-color); }
+        .header p { color: #6c757d; font-size: 0.9rem; }
+
+        .control-bar {
+            display: flex;
+            gap: 1.5rem;
+            padding: 1rem 2rem;
+            background: var(--control-bg);
+            border-bottom: 1px solid var(--border-color);
+            flex-wrap: wrap;
+        }
+        .input-group label {
+            display: block;
+            font-size: 0.8rem;
+            font-weight: 500;
+            margin-bottom: 0.4rem;
+            color: #495057;
+        }
+        .input-group input, .input-group select {
+            padding: 0.6rem 1rem;
+            border: 1px solid #ced4da;
+            border-radius: 6px;
+            font-size: 1rem;
+            width: 150px;
+        }
+
+        .canvas-area {
+            position: relative;
+            width: 100%;
+            height: 75vh;
+            min-height: 500px;
+            padding: 1rem;
+            background-color: #fdfdfd;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        .debug-info {
+            position: absolute;
+            bottom: 5px;
+            right: 10px;
+            font-size: 11px;
+            color: #aaa;
+            background: rgba(255,255,255,0.8);
+            padding: 2px 6px;
+            border-radius: 10px;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+<div class="main-card">
+    <div class="header">
+        <h1>An 型箭图 · 计算与可视化</h1>
+        <p>依据 Duan-Schiffler & Hernandez-Leclerc 框架，动态生成 AR 箭图结构</p>
+    </div>
+
+    <div class="control-bar">
+        <div class="input-group">
+            <label>顶点数 n</label>
+            <input type="number" id="inputN" value="3" min="1" max="12">
+        </div>
+        <div class="input-group">
+            <label>计算类型</label>
+            <select id="calcType">
+                <option value="Lm">L(m) (最高权单项式)</option>
+                <option value="C1lexi">C1lexi (组合结构)</option>
+                <option value="gM">gM (扩展 g-向量)</option>
+                <option value="socFM">socFM (socle 过滤矩阵)</option>
+            </select>
+        </div>
+    </div>
+
+    <div class="canvas-area">
+        <canvas id="mainCanvas"></canvas>
+        <div class="debug-info" id="debugInfo">初始化中...</div>
+    </div>
+</div>
+
+<script>
+class QuiverEngine {
+    constructor(canvasId, debugId = 'debugInfo') {
+        this.canvas = document.getElementById(canvasId);
+        this.debugEl = document.getElementById(debugId);
+        this.ctx = this.canvas.getContext('2d');
+        this.padding = 80;
+        this.resizeTimer = null;
+    }
+
+    updateDebug(msg) {
+        if (this.debugEl) this.debugEl.innerText = msg;
+    }
+
+    setupCanvas() {
+        const rect = this.canvas.parentElement.getBoundingClientRect();
+        // 防止尺寸为0导致绘制失败
+        if (rect.width === 0 || rect.height === 0) {
+            this.updateDebug("容器尺寸未就绪，等待重试...");
+            return false;
+        }
+        const dpr = window.devicePixelRatio || 1;
+        this.canvas.width = rect.width * dpr;
+        this.canvas.height = rect.height * dpr;
+        this.ctx.scale(dpr, dpr);
+        this.w = rect.width;
+        this.h = rect.height;
+        this.updateDebug(`画布尺寸 ${this.w} x ${this.h}`);
+        return true;
+    }
+
+    getBounds(nodes) {
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        nodes.forEach(n => {
+            minX = Math.min(minX, n.lx);
+            maxX = Math.max(maxX, n.lx);
+            minY = Math.min(minY, n.ly);
+            maxY = Math.max(maxY, n.ly);
+        });
+        return { minX, maxX, minY, maxY };
+    }
+
+    drawMatrix(x, y, label, isShifted, fontSize, isLm) {
+        const ctx = this.ctx;
+        ctx.font = `${fontSize}px ${isLm ? 'sans-serif' : '"Courier New", monospace'}`;
+        const lines = label.split('\n');
+        const lineHeight = fontSize * 1.2;
+        let maxWidth = 0;
+        lines.forEach(l => {
+            const w = ctx.measureText(l).width;
+            if (w > maxWidth) maxWidth = w;
+        });
+        const rectW = maxWidth + (isLm ? 12 : 10);
+        const rectH = lines.length * lineHeight + (isLm ? 4 : 8);
+
+        if (!isLm) {
+            ctx.strokeStyle = '#34495e';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(x - rectW/2 + 4, y - rectH/2);
+            ctx.lineTo(x - rectW/2, y - rectH/2);
+            ctx.lineTo(x - rectW/2, y + rectH/2);
+            ctx.lineTo(x - rectW/2 + 4, y + rectH/2);
+            ctx.moveTo(x + rectW/2 - 4, y - rectH/2);
+            ctx.lineTo(x + rectW/2, y - rectH/2);
+            ctx.lineTo(x + rectW/2, y + rectH/2);
+            ctx.lineTo(x + rectW/2 - 4, y + rectH/2);
+            ctx.stroke();
+        }
+
+        ctx.fillStyle = '#2c3e50';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        lines.forEach((line, i) => {
+            ctx.fillText(line, x, y - (rectH / 2) + (lineHeight / 2) + (isLm ? 2 : 4) + i * lineHeight);
+        });
+
+        if (!isLm && isShifted) {
+            ctx.font = `${fontSize * 0.75}px serif`;
+            ctx.fillText("[-1]", x + rectW/2 + 10, y);
+        }
+    }
+
+    drawArrow(p1, p2, isLm = false) {
+        const ctx = this.ctx;
+        const headlen = 8;
+        const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+        const offset = isLm ? 55 : 30;
+        const startX = p1.x + offset * Math.cos(angle);
+        const startY = p1.y + offset * Math.sin(angle);
+        const endX = p2.x - offset * Math.cos(angle);
+        const endY = p2.y - offset * Math.sin(angle);
+
+        if (Math.hypot(endX - startX, endY - startY) < 1) return;
+
+        ctx.beginPath();
+        ctx.moveTo(startX, startY);
+        ctx.lineTo(endX, endY);
+        ctx.strokeStyle = '#7f8c8d';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(endX, endY);
+        ctx.lineTo(endX - headlen * Math.cos(angle - Math.PI/6), endY - headlen * Math.sin(angle - Math.PI/6));
+        ctx.lineTo(endX - headlen * Math.cos(angle + Math.PI/6), endY - headlen * Math.sin(angle + Math.PI/6));
+        ctx.closePath();
+        ctx.fillStyle = '#7f8c8d';
+        ctx.fill();
+    }
+
+    generateLmNodes(n) {
+        const dynkin = Array.from({length: n}, (_, i) => i + 1);
+        const xi = Array.from({length: n}, (_, i) => -i);
+        const map = [
+            [...dynkin, ...dynkin],
+            [...xi, ...xi.map(val => val - 2)]
+        ];
+
+        const convert = (vector) => {
+            let tempVec = [...vector];
+            for (let i = 0; i < n; i++) {
+                if (tempVec[i] === -1) {
+                    tempVec[i] = 0;
+                    tempVec[i + n] += 1;
+                }
+            }
+            let parts = [];
+            for (let i = 0; i < 2 * n; i++) {
+                if (tempVec[i] === 1) {
+                    parts.push(`Y_{${map[0][i]},${map[1][i]}}`);
+                } else if (tempVec[i] > 1) {
+                    parts.push(`Y_{${map[0][i]},${map[1][i]}}^{${tempVec[i]}}`);
+                }
+            }
+            return `L(${parts.join('')})`;
+        };
+
+        let nodes = [];
+        let mat_new = Array.from({length: n}, () => new Array(2*n).fill(0));
+        for (let i = 0; i < n; i++) mat_new[i][n-i-1] = 1;
+
+        for (let j = 0; j < n; j++) {
+            nodes.push({ lx: j, ly: j, label: convert(mat_new[j]), shifted: false, isLm: true });
+        }
+
+        let mat_prev = mat_new;
+        for (let k = 0; k < n; k++) {
+            let mat_curr = Array.from({length: n}, () => new Array(2*n).fill(0));
+            for (let j = 0; j < n - k; j++) {
+                let vec = new Array(2*n).fill(0);
+                if (j > 0) for (let i = 0; i < 2*n; i++) vec[i] += mat_curr[j-1][i];
+                if (j < n - 1) for (let i = 0; i < 2*n; i++) vec[i] += mat_prev[j+1][i];
+                for (let i = 0; i < 2*n; i++) vec[i] -= mat_prev[j][i];
+                mat_curr[j] = vec;
+                nodes.push({ lx: 2*(k+1)+j, ly: j, label: convert(vec), shifted: false, isLm: true });
+            }
+            mat_prev = mat_curr;
+        }
+        return nodes;
+    }
+
+    render(n, type) {
+        if (!this.setupCanvas()) {
+            // 如果尺寸获取失败，延迟重试
+            setTimeout(() => this.render(n, type), 100);
+            return;
+        }
+
+        let nodes = [];
+        const nodeMap = new Map();
+
+        if (type === 'Lm') {
+            nodes = this.generateLmNodes(n);
+        } else {
+            const generateContent = {
+                'C1lexi': (j, k) => {
+                    let middle = "";
+                    if (k === -1) {
+                        for (let i = j; i >= 0; i--) middle += (n - i) + (i > 0 ? "\n" : "");
+                    } else {
+                        for (let i = j; i >= 0; i--) middle += (n - i - k - 1) + (i > 0 ? "\n" : "");
+                    }
+                    return middle;
+                },
+                'gM': (j, k, data) => data.matrices[`${k}_${j}`].join('\n'),
+                'socFM': (j, k) => {
+                    if (k === -1) return new Array(n).fill(0).join('\n');
+                    let vec = new Array(n).fill(0);
+                    vec[n - k - 1] = 1;
+                    return vec.join('\n');
+                }
+            };
+
+            const gMData = {};
+            if (type === 'gM') {
+                gMData.matrices = {};
+                let mat_new = Array.from({length: n}, () => new Array(n).fill(0));
+                for(let i=0; i<n; i++) mat_new[i][n-i-1] = 1;
+                for(let j=0; j<n; j++) gMData.matrices[`-1_${j}`] = mat_new[j];
+                let mat_prev = mat_new;
+                for(let k=0; k<n; k++) {
+                    let mat_curr = Array.from({length: n}, () => new Array(n).fill(0));
+                    for(let j=0; j < n-k; j++) {
+                        let vec = new Array(n).fill(0);
+                        if (j > 0) for(let i=0; i<n; i++) vec[i] += mat_curr[j-1][i];
+                        if (j < n - 1) for(let i=0; i<n; i++) vec[i] += mat_prev[j+1][i];
+                        for(let i=0; i<n; i++) vec[i] -= mat_prev[j][i];
+                        mat_curr[j] = vec;
+                        gMData.matrices[`${k}_${j}`] = vec;
+                    }
+                    mat_prev = mat_curr;
+                }
+            }
+
+            for (let j = 0; j < n; j++) {
+                nodes.push({ lx: j, ly: j, label: generateContent[type](j, -1, gMData), shifted: true, isLm: false });
+            }
+            for (let k = 0; k < n; k++) {
+                for (let j = 0; j < n - k; j++) {
+                    const lx = (k + 1) * 2 + j;
+                    const ly = j;
+                    nodes.push({ lx, ly, label: generateContent[type](j, k, gMData), shifted: false, isLm: false });
+                }
+            }
+        }
+
+        if (nodes.length === 0) {
+            this.updateDebug("错误：未生成任何节点");
+            return;
+        }
+
+        nodes.forEach(n => nodeMap.set(`${n.lx},${n.ly}`, n));
+
+        const edges = [];
+        nodes.forEach(node => {
+            if(node.lx === node.ly && node.lx > 0) {
+                const source = nodeMap.get(`${node.lx - 1},${node.ly - 1}`);
+                if (source) edges.push({ from: source, to: node });
+            } 
+            else if (node.lx > node.ly) {
+                const sourceUp = nodeMap.get(`${node.lx - 1},${node.ly - 1}`);
+                const sourceDown = nodeMap.get(`${node.lx - 1},${node.ly + 1}`);
+                if (sourceUp) edges.push({ from: sourceUp, to: node });
+                if (sourceDown) edges.push({ from: sourceDown, to: node });
+            }
+        });
+
+        const bounds = this.getBounds(nodes);
+        const rangeX = bounds.maxX - bounds.minX || 1;
+        const rangeY = bounds.maxY - bounds.minY || 1;
+        const scaleX = (this.w - this.padding * 2) / rangeX;
+        const scaleY = (this.h - this.padding * 2) / rangeY;
+        const scale = Math.min(scaleX, scaleY);
+        const fontSize = Math.max(8, Math.min(14, scale / 4));
+
+        const offsetX = (this.w - rangeX * scale) / 2 - bounds.minX * scale;
+        const offsetY = (this.h - rangeY * scale) / 2 - bounds.minY * scale;
+
+        nodes.forEach(n => {
+            n.x = n.lx * scale + offsetX;
+            n.y = this.h - (n.ly * scale + offsetY);
+        });
+
+        this.ctx.clearRect(0, 0, this.w, this.h);
+
+        edges.forEach(e => {
+            const isLmEdge = e.from.isLm || e.to.isLm;
+            this.drawArrow(e.from, e.to, isLmEdge);
+        });
+        nodes.forEach(n => this.drawMatrix(n.x, n.y, n.label, n.shifted, fontSize, n.isLm));
+
+        this.updateDebug(`渲染完成 | 节点数: ${nodes.length} | 边数: ${edges.length}`);
+    }
+}
+
+// 页面启动
+const engine = new QuiverEngine('mainCanvas');
+const inputN = document.getElementById('inputN');
+const calcType = document.getElementById('calcType');
+
+let renderTimeout;
+function performDraw() {
+    if (renderTimeout) clearTimeout(renderTimeout);
+    renderTimeout = setTimeout(() => {
+        const n = parseInt(inputN.value);
+        if (isNaN(n) || n < 1) return;
+        engine.render(n, calcType.value);
+    }, 50);
+}
+
+inputN.addEventListener('input', performDraw);
+calcType.addEventListener('change', performDraw);
+
+// 防抖 resize
+let resizeTimer;
+window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(performDraw, 150);
+});
+
+// 页面完全加载后执行第一次绘图
+window.addEventListener('load', () => {
+    performDraw();
+});
+</script>
+</body>
+</html>
